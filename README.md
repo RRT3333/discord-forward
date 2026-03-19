@@ -5,10 +5,12 @@ Cloudflare Email Workers로 수신 이메일을 처리해 Discord Webhook으로 
 주요 기능:
 - 수신 메일의 보낸 사람, 받는 주소, 제목 표시
 - 메일 본문 파싱 (`text/plain` 우선, 없으면 `text/html` 텍스트 변환)
+- MIME charset/encoded-word 디코딩으로 한글 깨짐 완화 (`subject`, `from`, 본문)
 - 본문 길이에 따른 하이브리드 전송
   - 4,000자 이하: 단일 embed
   - 4,001 ~ 12,000자: 분할 embed 전송
   - 12,000자 초과: 요약 + TXT 첨부
+- Discord 429 레이트리밋 감지 시 `Retry-After` 기반 재시도
 - 선택적으로 백업 주소로 메일 포워딩
 
 ## 1) 요구 사항
@@ -100,12 +102,22 @@ Git에 올리면 안 되는 것:
 - Discord에 본문이 안 보일 때
   - `DISCORD_WEBHOOK_URL` 설정 여부 확인
   - 본문이 너무 길면 자동으로 잘려 전송됨
+- Discord 429(Too Many Requests)가 보일 때
+  - 현재 코드는 `Retry-After` 및 `X-RateLimit-Reset-After`를 읽어 자동 재시도함
+  - 버스트가 잦으면 웹훅 분산 또는 큐 기반 직렬화 필요
+- 한글이 깨질 때
+  - 현재 `charset`/MIME encoded-word 디코딩을 적용함
+  - 발신 시스템이 비표준 인코딩을 쓰면 일부 문자가 깨질 수 있어 원문 첨부 방식 병행 권장
 - 메일 포워딩 실패 시
   - `BACKUP_FORWARD_TO` 주소가 Verified destination인지 확인
 - 배포 후 런타임 동작 차이
   - `wrangler.jsonc`의 `compatibility_date`를 최신으로 유지
 
-## 9) 참고 문서
+## 9) 운영 당면 과제
+
+- 상세 체크리스트: `docs/OPEN_ITEMS.md`
+
+## 10) 참고 문서
 
 - Cloudflare Email Workers Runtime API:
   - https://developers.cloudflare.com/email-routing/email-workers/runtime-api/

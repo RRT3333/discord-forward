@@ -1,8 +1,29 @@
-function decodeQuotedPrintable(input) {
-  const softBreaksRemoved = input.replace(/=\r?\n/g, "");
-  return softBreaksRemoved.replace(/=([0-9A-Fa-f]{2})/g, (_, hex) => {
-    return String.fromCharCode(parseInt(hex, 16));
-  });
+function normalizeCharset(charset) {
+  if (!charset) return "utf-8";
+  const normalized = charset.trim().replace(/^"|"$/g, "").toLowerCase();
+  const map = {
+    "ks_c_5601-1987": "euc-kr",
+    "x-windows-949": "euc-kr",
+    "windows-949": "euc-kr",
+    "cp949": "euc-kr",
+    "uhc": "euc-kr"
+  };
+  return map[normalized] || normalized;
+}
+
+function decodeBytesWithCharset(bytes, charset) {
+  const preferred = normalizeCharset(charset);
+  const candidates = [preferred, "utf-8", "euc-kr", "windows-1252"];
+
+  for (const candidate of candidates) {
+    try {
+      return new TextDecoder(candidate, { fatal: false }).decode(bytes);
+    } catch {
+      // Try next charset candidate.
+    }
+  }
+
+  return new TextDecoder("utf-8").decode(bytes);
 }
 
 function decodeBase64ToString(input, charset) {
@@ -12,11 +33,43 @@ function decodeBase64ToString(input, charset) {
   for (let i = 0; i < binary.length; i += 1) {
     bytes[i] = binary.charCodeAt(i);
   }
-  try {
-    return new TextDecoder(charset || "utf-8", { fatal: false }).decode(bytes);
-  } catch {
-    return new TextDecoder("utf-8").decode(bytes);
+
+  return decodeBytesWithCharset(bytes, charset);
+}
+
+function decodeQuotedPrintableToBytes(input) {
+  const softBreaksRemoved = input.replace(/=\r?\n/g, "");
+  const bytes = [];
+
+  for (let i = 0; i < softBreaksRemoved.length; i += 1) {
+    if (softBreaksRemoved[i] === "=" && /^[0-9A-Fa-f]{2}$/.test(softBreaksRemoved.slice(i + 1, i + 3))) {
+      bytes.push(parseInt(softBreaksRemoved.slice(i + 1, i + 3), 16));
+      i += 2;
+    } else {
+      bytes.push(softBreaksRemoved.charCodeAt(i) & 0xff);
+    }
   }
+
+  return new Uint8Array(bytes);
+}
+
+function decodeMimeEncodedWords(value) {
+  if (!value || value.indexOf("=?") === -1) return value;
+
+  const collapsed = value.replace(/\?=\s+=\?/g, "?==?");
+  return collapsed.replace(/=\?([^?]+)\?([bBqQ])\?([^?]*)\?=/g, (_, charset, encoding, text) => {
+    try {
+      if (encoding.toLowerCase() === "b") {
+        return decodeBase64ToString(text, charset);
+      }
+
+      const qText = text.replace(/_/g, " ");
+      const bytes = decodeQuotedPrintableToBytes(qText);
+      return decodeBytesWithCharset(bytes, charset);
+    } catch {
+      return _;
+    }
+  });
 }
 
 function stripHtml(html) {
@@ -69,16 +122,15 @@ function decodeBody(body, headers) {
     return decodeBase64ToString(body, charset);
   }
   if (transferEncoding === "quoted-printable") {
-    const decoded = decodeQuotedPrintable(body);
-    try {
-      return new TextDecoder(charset || "utf-8", { fatal: false }).decode(
-        new TextEncoder().encode(decoded)
-      );
-    } catch {
-      return decoded;
-    }
+    const bytes = decodeQuotedPrintableToBytes(body);
+    return decodeBytesWithCharset(bytes, charset);
   }
-  return body;
+
+  const bytes = new Uint8Array(body.length);
+  for (let i = 0; i < body.length; i += 1) {
+    bytes[i] = body.charCodeAt(i) & 0xff;
+  }
+  return decodeBytesWithCharset(bytes, charset);
 }
 
 function extractTextFromMultipart(body, boundary) {
@@ -158,7 +210,7 @@ function splitIntoChunks(text, maxLength) {
 }
 
 async function postDiscordJson(webhookUrl, payload) {
-  const response = await fetch(webhookUrl, {
+  const response = await fetchDiscordWithRetry(webhookUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload)
@@ -179,7 +231,7 @@ async function postDiscordWithAttachment(webhookUrl, payload, filename, content)
     filename
   );
 
-  const response = await fetch(webhookUrl, {
+  const response = await fetchDiscordWithRetry(webhookUrl, {
     method: "POST",
     body: formData
   });
@@ -188,6 +240,55 @@ async function postDiscordWithAttachment(webhookUrl, payload, filename, content)
     const responseText = await response.text();
     throw new Error(`Discord attachment upload failed: ${response.status} ${responseText}`);
   }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getRetryDelayMs(response, responseJson) {
+  const retryAfterHeader = response.headers.get("Retry-After");
+  if (retryAfterHeader) {
+    const seconds = Number.parseFloat(retryAfterHeader);
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.ceil(seconds * 1000);
+  }
+
+  const resetAfterHeader = response.headers.get("X-RateLimit-Reset-After");
+  if (resetAfterHeader) {
+    const seconds = Number.parseFloat(resetAfterHeader);
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.ceil(seconds * 1000);
+  }
+
+  if (responseJson && typeof responseJson.retry_after === "number" && responseJson.retry_after >= 0) {
+    return Math.ceil(responseJson.retry_after * 1000);
+  }
+
+  return 1500;
+}
+
+async function fetchDiscordWithRetry(webhookUrl, options) {
+  const maxRetries = 4;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+    const response = await fetch(webhookUrl, options);
+    if (response.status !== 429) return response;
+
+    let responseJson = null;
+    try {
+      responseJson = await response.clone().json();
+    } catch {
+      // Ignore parse errors and use headers fallback.
+    }
+
+    if (attempt === maxRetries) {
+      return response;
+    }
+
+    const retryDelayMs = getRetryDelayMs(response, responseJson);
+    await sleep(retryDelayMs + 100);
+  }
+
+  throw new Error("Discord webhook retry loop exited unexpectedly");
 }
 
 async function postMetadataEmbed(webhookUrl, meta, extraFields = []) {
@@ -269,9 +370,9 @@ export default {
     const webhookUrl = env.DISCORD_WEBHOOK_URL;
     const backupForwardTo = env.BACKUP_FORWARD_TO;
 
-    const subject = message.headers.get("subject") || "(No Subject)";
-    const fromAddr = message.headers.get("from") || "unknown";
-    const toAddr = message.headers.get("to") || "unknown";
+    const subject = decodeMimeEncodedWords(message.headers.get("subject") || "(No Subject)");
+    const fromAddr = decodeMimeEncodedWords(message.headers.get("from") || "unknown");
+    const toAddr = decodeMimeEncodedWords(message.headers.get("to") || "unknown");
 
     const rawEmail = await new Response(message.raw).text();
     const bodyText = extractEmailBody(rawEmail) || "(본문 없음)";
