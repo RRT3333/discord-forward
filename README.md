@@ -116,6 +116,7 @@ Git에 올리면 안 되는 것:
 ## 9) 운영 당면 과제
 
 - 상세 체크리스트: `docs/OPEN_ITEMS.md`
+- 직원 운영 런북: `docs/TEAM_NOTIFICATION_RUNBOOK.md`
 
 ## 10) 참고 문서
 
