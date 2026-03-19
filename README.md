@@ -5,7 +5,10 @@ Cloudflare Email Workers로 수신 이메일을 처리해 Discord Webhook으로 
 주요 기능:
 - 수신 메일의 보낸 사람, 받는 주소, 제목 표시
 - 메일 본문 파싱 (`text/plain` 우선, 없으면 `text/html` 텍스트 변환)
-- 본문 길이 제한(Discord embed description 제한 대응)
+- 본문 길이에 따른 하이브리드 전송
+  - 4,000자 이하: 단일 embed
+  - 4,001 ~ 12,000자: 분할 embed 전송
+  - 12,000자 초과: 요약 + TXT 첨부
 - 선택적으로 백업 주소로 메일 포워딩
 
 ## 1) 요구 사항

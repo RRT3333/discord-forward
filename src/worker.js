@@ -134,6 +134,136 @@ function truncateForDiscord(text, maxLength) {
   return text.slice(0, Math.max(0, maxLength - 3)) + "...";
 }
 
+function splitIntoChunks(text, maxLength) {
+  if (text.length <= maxLength) return [text];
+
+  const chunks = [];
+  let cursor = 0;
+  while (cursor < text.length) {
+    let end = Math.min(cursor + maxLength, text.length);
+    if (end < text.length) {
+      const lastBreak = Math.max(
+        text.lastIndexOf("\n", end),
+        text.lastIndexOf(" ", end)
+      );
+      if (lastBreak > cursor + Math.floor(maxLength * 0.6)) {
+        end = lastBreak;
+      }
+    }
+    chunks.push(text.slice(cursor, end).trim());
+    cursor = end;
+  }
+
+  return chunks.filter(Boolean);
+}
+
+async function postDiscordJson(webhookUrl, payload) {
+  const response = await fetch(webhookUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+
+  if (!response.ok) {
+    const responseText = await response.text();
+    throw new Error(`Discord webhook failed: ${response.status} ${responseText}`);
+  }
+}
+
+async function postDiscordWithAttachment(webhookUrl, payload, filename, content) {
+  const formData = new FormData();
+  formData.append("payload_json", JSON.stringify(payload));
+  formData.append(
+    "files[0]",
+    new Blob([content], { type: "text/plain; charset=utf-8" }),
+    filename
+  );
+
+  const response = await fetch(webhookUrl, {
+    method: "POST",
+    body: formData
+  });
+
+  if (!response.ok) {
+    const responseText = await response.text();
+    throw new Error(`Discord attachment upload failed: ${response.status} ${responseText}`);
+  }
+}
+
+async function postMetadataEmbed(webhookUrl, meta, extraFields = []) {
+  await postDiscordJson(webhookUrl, {
+    embeds: [{
+      title: "📩 새 메일 도착",
+      fields: [
+        { name: "보낸 사람", value: meta.fromAddr, inline: true },
+        { name: "받는 주소", value: meta.toAddr, inline: true },
+        { name: "제목", value: meta.subject },
+        ...extraFields
+      ],
+      color: 3447003,
+      timestamp: new Date().toISOString()
+    }]
+  });
+}
+
+async function sendEmailToDiscord(webhookUrl, meta) {
+  const EMBED_LIMIT = 4000;
+  const CHUNK_LIMIT = 3800;
+  const SPLIT_THRESHOLD = 12000;
+
+  if (meta.bodyText.length <= EMBED_LIMIT) {
+    await postMetadataEmbed(webhookUrl, meta);
+    await postDiscordJson(webhookUrl, {
+      embeds: [{
+        title: "📄 메일 본문",
+        description: meta.bodyText,
+        color: 3447003,
+        timestamp: new Date().toISOString()
+      }]
+    });
+    return;
+  }
+
+  if (meta.bodyText.length <= SPLIT_THRESHOLD) {
+    const chunks = splitIntoChunks(meta.bodyText, CHUNK_LIMIT);
+    await postMetadataEmbed(webhookUrl, meta, [{ name: "전송 방식", value: `분할 전송 (${chunks.length}개)` }]);
+
+    for (let i = 0; i < chunks.length; i += 1) {
+      await postDiscordJson(webhookUrl, {
+        embeds: [{
+          title: "📄 메일 본문",
+          description: chunks[i],
+          fields: [{ name: "본문 분할", value: `${i + 1}/${chunks.length}` }],
+          color: 3447003,
+          timestamp: new Date().toISOString()
+        }]
+      });
+    }
+    return;
+  }
+
+  const summary = truncateForDiscord(meta.bodyText, 500);
+  const safeSubject = meta.subject.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 80) || "mail";
+  const filename = `mail-${safeSubject}-${Date.now()}.txt`;
+
+  await postMetadataEmbed(webhookUrl, meta, [{ name: "전송 방식", value: "요약 + TXT 첨부" }]);
+
+  await postDiscordWithAttachment(
+    webhookUrl,
+    {
+      content: "본문이 길어 요약 + 첨부파일로 전송합니다.",
+      embeds: [{
+        title: "📄 메일 본문 요약",
+        description: summary,
+        color: 3447003,
+        timestamp: new Date().toISOString()
+      }]
+    },
+    filename,
+    meta.bodyText
+  );
+}
+
 export default {
   async email(message, env, ctx) {
     const webhookUrl = env.DISCORD_WEBHOOK_URL;
@@ -145,25 +275,13 @@ export default {
 
     const rawEmail = await new Response(message.raw).text();
     const bodyText = extractEmailBody(rawEmail) || "(본문 없음)";
-    const description = truncateForDiscord(bodyText, 4000);
 
     if (webhookUrl) {
-      await fetch(webhookUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          embeds: [{
-            title: "📩 새 메일 도착",
-            description,
-            fields: [
-              { name: "보낸 사람", value: fromAddr, inline: true },
-              { name: "받는 주소", value: toAddr, inline: true },
-              { name: "제목", value: subject }
-            ],
-            color: 3447003,
-            timestamp: new Date().toISOString()
-          }]
-        })
+      await sendEmailToDiscord(webhookUrl, {
+        subject,
+        fromAddr,
+        toAddr,
+        bodyText
       });
     }
 
