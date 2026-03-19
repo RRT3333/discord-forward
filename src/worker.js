@@ -72,20 +72,59 @@ function decodeMimeEncodedWords(value) {
   });
 }
 
-function stripHtml(html) {
-  const withBreaks = html
-    .replace(/<\s*br\s*\/?\s*>/gi, "\n")
-    .replace(/<\s*\/p\s*>/gi, "\n")
-    .replace(/<\s*p\s*>/gi, "\n");
-  const noTags = withBreaks.replace(/<[^>]+>/g, "");
-  return noTags
+function decodeHtmlEntities(input) {
+  return input
     .replace(/&nbsp;/gi, " ")
     .replace(/&lt;/gi, "<")
     .replace(/&gt;/gi, ">")
     .replace(/&amp;/gi, "&")
     .replace(/&quot;/gi, "\"")
     .replace(/&#39;/gi, "'")
+    .replace(/&#x27;/gi, "'")
+    .replace(/&#x2f;/gi, "/");
+}
+
+function normalizeEmailText(input) {
+  return input
+    .replace(/\r\n?/g, "\n")
+    .replace(/\u00a0/g, " ")
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n[ \t]+/g, "\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+function extractUrls(text) {
+  const matches = text.match(/https?:\/\/[^\s)\]>"']+/gi);
+  return matches || [];
+}
+
+function htmlToText(html) {
+  let transformed = html
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<script\b[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style\b[\s\S]*?<\/style>/gi, " ");
+
+  transformed = transformed.replace(/<a\b[^>]*href\s*=\s*['\"]([^'\"]+)['\"][^>]*>([\s\S]*?)<\/a>/gi, (_, href, label) => {
+    const cleanHref = decodeHtmlEntities(href || "").trim();
+    const cleanLabel = decodeHtmlEntities((label || "").replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
+
+    if (!cleanHref) return cleanLabel;
+    if (!cleanLabel) return cleanHref;
+    if (cleanLabel.includes(cleanHref)) return cleanLabel;
+    return `${cleanLabel} ${cleanHref}`;
+  });
+
+  transformed = transformed
+    .replace(/<\s*br\s*\/?\s*>/gi, "\n")
+    .replace(/<\s*\/(p|div|section|article|li|tr|h[1-6])\s*>/gi, "\n")
+    .replace(/<\s*(p|div|section|article|ul|ol|table|tbody|thead|tfoot|tr|h[1-6])\b[^>]*>/gi, "\n")
+    .replace(/<\s*li\b[^>]*>/gi, "\n- ")
+    .replace(/<[^>]+>/g, " ");
+
+  return normalizeEmailText(decodeHtmlEntities(transformed));
 }
 
 function parseHeaders(rawHeaders) {
@@ -150,14 +189,25 @@ function extractTextFromMultipart(body, boundary) {
     const decodedBody = decodeBody(rawBody, headers);
 
     if (contentType.startsWith("text/plain")) {
-      plainText = decodedBody.trim();
+      plainText = normalizeEmailText(decodedBody);
     } else if (contentType.startsWith("text/html")) {
-      htmlText = decodedBody.trim();
+      htmlText = decodedBody;
     }
   }
 
-  if (plainText) return plainText;
-  if (htmlText) return stripHtml(htmlText);
+  if (plainText) {
+    if (htmlText) {
+      const htmlAsText = htmlToText(htmlText);
+      const plainUrls = new Set(extractUrls(plainText));
+      const missingUrls = extractUrls(htmlAsText).filter((url) => !plainUrls.has(url));
+      if (missingUrls.length > 0) {
+        plainText = normalizeEmailText(`${plainText}\n\n링크:\n${missingUrls.join("\n")}`);
+      }
+    }
+    return plainText;
+  }
+
+  if (htmlText) return htmlToText(htmlText);
   return "";
 }
 
@@ -176,9 +226,9 @@ function extractEmailBody(rawEmail) {
 
   const decoded = decodeBody(body, headers);
   if (contentType.toLowerCase().startsWith("text/html")) {
-    return stripHtml(decoded);
+    return htmlToText(decoded);
   }
-  return decoded.trim();
+  return normalizeEmailText(decoded);
 }
 
 function truncateForDiscord(text, maxLength) {

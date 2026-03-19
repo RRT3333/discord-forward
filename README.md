@@ -6,6 +6,8 @@ Cloudflare Email Workers로 수신 이메일을 처리해 Discord Webhook으로 
 - 수신 메일의 보낸 사람, 받는 주소, 제목 표시
 - 메일 본문 파싱 (`text/plain` 우선, 없으면 `text/html` 텍스트 변환)
 - MIME charset/encoded-word 디코딩으로 한글 깨짐 완화 (`subject`, `from`, 본문)
+- HTML 본문의 링크(`href`)를 URL 텍스트로 보존해 Discord에서 클릭 가능하게 처리
+- 과도한 공백/줄바꿈 정규화로 본문 가독성 개선
 - 본문 길이에 따른 하이브리드 전송
   - 4,000자 이하: 단일 embed
   - 4,001 ~ 12,000자: 분할 embed 전송
