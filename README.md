@@ -40,6 +40,15 @@ npm run dev
 npm run deploy
 ```
 
+GitHub Actions 수동 배포:
+- 워크플로우 파일: `.github/workflows/manual-deploy.yml`
+- GitHub 저장소 > Actions > Manual Deploy Worker > Run workflow
+- `git_ref`에 배포할 브랜치/커밋 지정 가능 (기본값: `main`)
+
+필수 GitHub Secrets:
+- `CLOUDFLARE_API_TOKEN`
+- `CLOUDFLARE_ACCOUNT_ID`
+
 ## 4) 환경변수/시크릿 설정
 
 이 프로젝트는 민감값을 코드에 하드코딩하지 않습니다.
