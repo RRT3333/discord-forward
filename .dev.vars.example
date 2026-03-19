@@ -1,0 +1,2 @@
+DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/REPLACE_ME/REPLACE_ME"
+BACKUP_FORWARD_TO="you@example.com"
